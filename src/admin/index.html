@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR Enhance Agent - 管理后台</title>
+<style>
+:root {
+  --bg: #0f1117;
+  --sidebar-bg: #161822;
+  --card-bg: #1a1d2e;
+  --border: #2a2d3e;
+  --text: #e1e4eb;
+  --text-muted: #8b8fa3;
+  --primary: #6366f1;
+  --primary-hover: #818cf8;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --info: #3b82f6;
+  --radius: 8px;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif; background:var(--bg); color:var(--text); display:flex; height:100vh; overflow:hidden; }
+a { color:var(--primary); text-decoration:none; }
+
+.sidebar { width:220px; background:var(--sidebar-bg); border-right:1px solid var(--border); display:flex; flex-direction:column; flex-shrink:0; }
+.sidebar-header { padding:20px; border-bottom:1px solid var(--border); }
+.sidebar-header h1 { font-size:15px; font-weight:700; }
+.sidebar-header span { font-size:11px; color:var(--text-muted); }
+.sidebar-nav { flex:1; padding:12px 0; }
+.nav-item { display:flex; align-items:center; gap:10px; padding:10px 20px; cursor:pointer; color:var(--text-muted); font-size:14px; border-left:3px solid transparent; transition:all .15s; }
+.nav-item:hover { color:var(--text); background:rgba(255,255,255,.03); }
+.nav-item.active { color:var(--primary); border-left-color:var(--primary); background:rgba(99,102,241,.08); }
+.nav-item svg { width:18px; height:18px; }
+.sidebar-footer { padding:12px 20px; border-top:1px solid var(--border); font-size:11px; color:var(--text-muted); }
+
+.main { flex:1; overflow-y:auto; }
+.page { display:none; padding:24px 32px; }
+.page.active { display:block; }
+.page-header { margin-bottom:24px; }
+.page-header h2 { font-size:22px; font-weight:700; }
+.page-header p { color:var(--text-muted); font-size:13px; margin-top:4px; }
+
+.stats-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(200px, 1fr)); gap:16px; margin-bottom:24px; }
+.stat-card { background:var(--card-bg); border:1px solid var(--border); border-radius:var(--radius); padding:20px; }
+.stat-card .label { font-size:12px; color:var(--text-muted); margin-bottom:8px; }
+.stat-card .value { font-size:32px; font-weight:700; }
+.stat-card .sub { font-size:12px; color:var(--text-muted); margin-top:4px; }
+.stat-card.success .value { color:var(--success); }
+.stat-card.danger .value { color:var(--danger); }
+.stat-card.warning .value { color:var(--warning); }
+.stat-card.info .value { color:var(--info); }
+
+.table-container { background:var(--card-bg); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
+table { width:100%; border-collapse:collapse; }
+th { text-align:left; font-size:11px; text-transform:uppercase; color:var(--text-muted); padding:12px 16px; background:rgba(255,255,255,.02); border-bottom:1px solid var(--border); letter-spacing:.5px; }
+td { padding:10px 16px; font-size:13px; border-bottom:1px solid var(--border); }
+tr:last-child td { border-bottom:none; }
+tr:hover { background:rgba(255,255,255,.02); }
+
+.badge { display:inline-block; padding:2px 8px; border-radius:12px; font-size:11px; font-weight:600; }
+.badge-success { background:rgba(34,197,94,.15); color:var(--success); }
+.badge-failed { background:rgba(239,68,68,.15); color:var(--danger); }
+.badge-skipped { background:rgba(245,158,11,.15); color:var(--warning); }
+.badge-running { background:rgba(59,130,246,.15); color:var(--info); }
+.badge-pending { background:rgba(139,143,163,.15); color:var(--text-muted); }
+
+.btn { display:inline-flex; align-items:center; gap:6px; padding:8px 16px; border-radius:6px; font-size:13px; font-weight:600; cursor:pointer; border:none; transition:all .15s; }
+.btn-primary { background:var(--primary); color:#fff; }
+.btn-primary:hover { background:var(--primary-hover); }
+.btn-outline { background:transparent; border:1px solid var(--border); color:var(--text); }
+.btn-outline:hover { background:rgba(255,255,255,.05); }
+.btn-danger { background:var(--danger); color:#fff; }
+.btn-danger:hover { opacity:.9; }
+.btn-sm { padding:4px 10px; font-size:12px; }
+.btn-group { display:flex; gap:8px; margin-bottom:16px; }
+
+.filters { display:flex; gap:12px; margin-bottom:16px; align-items:center; flex-wrap:wrap; }
+.filters select, .filters input { padding:6px 12px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:13px; }
+.filters select { cursor:pointer; }
+
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; justify-content:center; align-items:center; }
+.modal-overlay.active { display:flex; }
+.modal { background:var(--card-bg); border:1px solid var(--border); border-radius:12px; padding:24px; width:90%; max-width:750px; max-height:85vh; overflow-y:auto; }
+.modal h3 { font-size:18px; margin-bottom:20px; }
+.modal-close { float:right; background:none; border:none; color:var(--text-muted); font-size:22px; cursor:pointer; line-height:1; }
+
+.form-group { margin-bottom:16px; }
+.form-group label { display:block; font-size:12px; font-weight:600; color:var(--text-muted); margin-bottom:4px; }
+.form-group input, .form-group select, .form-group textarea { width:100%; padding:8px 12px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:13px; }
+.form-group textarea { min-height:100px; resize:vertical; font-family:monospace; font-size:12px; }
+.form-row { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+.form-actions { display:flex; gap:8px; margin-top:20px; justify-content:flex-end; }
+.form-section { margin:20px 0 8px; font-size:14px; font-weight:700; color:var(--primary); border-bottom:1px solid var(--border); padding-bottom:4px; }
+
+.json-view { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:16px; font-family:monospace; font-size:12px; overflow-x:auto; white-space:pre-wrap; max-height:400px; overflow-y:auto; }
+
+.pagination { display:flex; gap:8px; align-items:center; margin-top:16px; font-size:13px; color:var(--text-muted); }
+.pagination button { padding:4px 12px; border-radius:4px; border:1px solid var(--border); background:var(--bg); color:var(--text); cursor:pointer; font-size:12px; }
+.pagination button:disabled { opacity:.4; cursor:default; }
+
+.toast { position:fixed; top:20px; right:20px; z-index:200; padding:12px 20px; border-radius:8px; font-size:13px; font-weight:600; animation:slideIn .3s ease; }
+.toast-success { background:var(--success); color:#000; }
+.toast-error { background:var(--danger); color:#fff; }
+@keyframes slideIn { from{transform:translateX(100%);opacity:0} to{transform:translateX(0);opacity:1} }
+
+.empty { text-align:center; padding:40px; color:var(--text-muted); }
+.empty svg { width:48px; height:48px; margin-bottom:12px; opacity:.3; }
+
+::-webkit-scrollbar { width:6px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--border); border-radius:3px; }
+
+.hint-box { background:rgba(99,102,241,.08); border:1px solid var(--primary); border-radius:var(--radius); padding:16px 20px; margin-bottom:20px; font-size:13px; line-height:1.8; }
+.hint-box strong { color:var(--primary); }
+</style>
+</head>
+<body>
+
+<!-- 侧边栏 -->
+<aside class="sidebar">
+  <div class="sidebar-header">
+    <h1>PR Enhance Agent</h1>
+    <span>管理后台</span>
+  </div>
+  <nav class="sidebar-nav">
+    <div class="nav-item active" data-page="dashboard">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
+      仪表盘
+    </div>
+    <div class="nav-item" data-page="routes">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3"/></svg>
+      路由配置
+    </div>
+    <div class="nav-item" data-page="jobs">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      任务记录
+    </div>
+    <div class="nav-item" data-page="settings">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+      系统设置
+    </div>
+  </nav>
+  <div class="sidebar-footer" id="server-status">连接中...</div>
+</aside>
+
+<!-- 主内容 -->
+<main class="main" id="main-content"></main>
+
+<!-- 弹窗 -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal" id="modal-content"></div>
+</div>
+
+<script>
+let currentPage = 'dashboard';
+
+function navigate(page) {
+  currentPage = page;
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.toggle('active', el.dataset.page === page));
+  renderPage(page);
+}
+
+const pages = { dashboard, routes, jobs, settings };
+
+async function renderPage(page) {
+  const main = document.getElementById('main-content');
+  main.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text-muted)">加载中...</div>';
+  try {
+    const html = await pages[page]();
+    main.innerHTML = html;
+    if (page === 'dashboard') initDashboard();
+    if (page === 'routes') initRoutes();
+    if (page === 'jobs') initJobs();
+    if (page === 'settings') initSettings();
+  } catch (e) {
+    main.innerHTML = `<div class="page active"><div class="empty">加载失败: ${e.message}</div></div>`;
+  }
+}
+
+document.querySelectorAll('.nav-item').forEach(el => {
+  el.addEventListener('click', () => navigate(el.dataset.page));
+});
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, opts);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  return res.json();
+}
+
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast toast-${type}`;
+  el.textContent = msg;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+function openModal(html) {
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal-overlay').classList.add('active');
+}
+function closeModal() {
+  document.getElementById('modal-overlay').classList.remove('active');
+}
+document.getElementById('modal-overlay').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) closeModal();
+});
+
+// ====== 仪表盘 ======
+async function dashboard() {
+  const stats = await api('/api/jobs/stats');
+  const sc = {};
+  (stats.byStatus || []).forEach(s => sc[s.status] = s.c);
+
+  return `
+    <div class="page active">
+      <div class="page-header"><h2>仪表盘</h2><p>Bot 运行状态概览</p></div>
+      <div class="stats-grid">
+        <div class="stat-card info"><div class="label">总任务数</div><div class="value">${stats.total}</div></div>
+        <div class="stat-card success"><div class="label">成功</div><div class="value">${sc.success || 0}</div><div class="sub">近24小时: ${stats.last24h?.success || 0}</div></div>
+        <div class="stat-card danger"><div class="label">失败</div><div class="value">${sc.failed || 0}</div><div class="sub">近24小时: ${stats.last24h?.failed || 0}</div></div>
+        <div class="stat-card warning"><div class="label">已跳过</div><div class="value">${sc.skipped || 0}</div></div>
+        <div class="stat-card"><div class="label">运行中/等待中</div><div class="value">${(sc.running||0)+(sc.pending||0)}</div></div>
+      </div>
+      <div class="hint-box">
+        <strong>使用说明</strong><br>
+        1. 在 <strong>路由配置</strong> 页面设置 Webhook 路由和 AI 策略<br>
+        2. 在 Gitee 仓库添加 Webhook，URL 填 <code>/webhook/gitee/路由名</code><br>
+        3. PR 事件触发后，Agent 会自动拉代码、调 AI、提交推送
+      </div>
+      <h3 style="margin-bottom:12px;font-size:15px">最近任务</h3>
+      <div class="table-container" id="recent-jobs-table"></div>
+    </div>`;
+}
+
+function initDashboard() {
+  api('/api/jobs?limit=5').then(data => {
+    document.getElementById('recent-jobs-table').innerHTML = renderJobTable(data.jobs || []);
+  });
+}
+
+// ====== 路由配置 ======
+async function routes() {
+  const data = await api('/api/routes');
+  const rows = data.map(r => `
+    <tr>
+      <td><strong>${esc(r.name)}</strong></td>
+      <td><code>${esc(r.path)}</code></td>
+      <td>${(r.events||[]).join(', ')}</td>
+      <td>${esc(r.job?.strategy?.type || '-')}</td>
+      <td>${esc(r.job?.repo || '-')}</td>
+      <td>
+        <button class="btn btn-outline btn-sm" onclick="editRoute('${esc(r.name)}')">编辑</button>
+        <button class="btn btn-outline btn-sm" style="color:var(--danger)" onclick="deleteRoute('${esc(r.name)}')">删除</button>
+      </td>
+    </tr>`).join('');
+
+  return `
+    <div class="page active">
+      <div class="page-header"><h2>路由配置</h2><p>管理 Webhook 监听和任务策略</p></div>
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="editRoute('new')">+ 新建路由</button>
+        <button class="btn btn-outline" onclick="navigate('routes')">刷新</button>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead><tr><th>名称</th><th>路径</th><th>事件</th><th>策略类型</th><th>目标仓库</th><th style="width:120px">操作</th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="6" class="empty">暂无路由配置</td></tr>'}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function initRoutes() {}
+
+async function loadPrompts(routeName) {
+  try {
+    const data = await api(`/api/prompts/${encodeURIComponent(routeName)}`);
+    document.getElementById('system-prompt-editor').value = data.systemPrompt || '';
+    document.getElementById('user-prompt-editor').value = data.userPrompt || '';
+    toast('提示词已加载');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+async function editRoute(name) {
+  const isNew = name === 'new';
+  const defaultRoute = {
+    name:'', path:'/webhook/gitee/', secret:'${GITEE_WEBHOOK_SECRET}', provider:'gitee',
+    events:['pull_request'],
+    rules:{actions:['open','update'],targetBranches:['master','main'],ignoreSenders:[]},
+    job:{
+      repo:'', git:{branchFrom:'pr.sourceBranch',baseFrom:'pr.targetBranch'},
+      strategy:{type:'llm',provider:'deepseek',model:'deepseek-chat',apiKeyEnv:'DEEPSEEK_API_KEY',baseUrlEnv:'DEEPSEEK_BASE_URL',systemPromptFile:'./prompts/pr-doc-system.md',userPromptTemplate:'./prompts/pr-doc-user.tpl',workspaceSkillFile:'',outputFormat:'json',temperature:0.3,maxTokens:4096,timeoutSec:300,allowedPaths:['CHANGELOG.md']},
+      commit:{message:'docs: 根据 PR #{{pr.number}} 更新文档 [bot:pr-doc]',author:{name:'PR Enhance Bot',email:'bot@example.com'}},
+      guard:{idempotency:'pr.headSha',skipIfLastCommitMatches:'\\\\[bot:pr-doc\\\\]'},
+      notify:{prComment:true}
+    }
+  };
+
+  let route = defaultRoute;
+  if (!isNew) {
+    try { route = await api(`/api/routes/${name}`); } catch(e) { toast(e.message, 'error'); return; }
+  }
+
+  const strat = route.job?.strategy || {};
+  const stratType = strat.type || 'llm';
+
+  openModal(`
+    <button class="modal-close" onclick="closeModal()">&times;</button>
+    <h3>${isNew ? '新建路由' : '编辑路由: ' + esc(name)}</h3>
+    <form id="route-form">
+      <div class="form-row">
+        <div class="form-group"><label>路由名称</label><input name="name" value="${esc(route.name)}" required placeholder="例如: pr-doc"></div>
+        <div class="form-group"><label>Webhook 路径</label><input name="path" value="${esc(route.path)}" required placeholder="/webhook/gitee/pr-doc"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Webhook 密码</label><input name="secret" value="${esc(route.secret)}" placeholder="或填 \${ENV_VAR}"></div>
+        <div class="form-group"><label>平台</label><select name="provider"><option value="gitee" ${route.provider==='gitee'?'selected':''}>Gitee</option><option value="github" ${route.provider==='github'?'selected':''}>GitHub</option></select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>监听事件（逗号分隔）</label><input name="events" value="${(route.events||[]).join(',')}" placeholder="pull_request"></div>
+        <div class="form-group"><label>目标仓库</label><input name="repo" value="${esc(route.job?.repo||'')}" placeholder="owner/repo-name"></div>
+      </div>
+
+      <div class="form-section">触发规则</div>
+      <div class="form-row">
+        <div class="form-group"><label>触发动作（逗号分隔）</label><input name="rules.actions" value="${(route.rules?.actions||[]).join(',')}" placeholder="open, update, reopen"></div>
+        <div class="form-group"><label>目标分支（逗号分隔）</label><input name="rules.targetBranches" value="${(route.rules?.targetBranches||[]).join(',')}" placeholder="master, main"></div>
+      </div>
+      <div class="form-group"><label>忽略发送者（逗号分隔）</label><input name="rules.ignoreSenders" value="${(route.rules?.ignoreSenders||[]).join(',')}" placeholder="bot-username"></div>
+
+      <div class="form-section">AI 策略</div>
+      <div class="form-row">
+        <div class="form-group"><label>策略类型</label><select name="strategy.type" id="strat-type">
+          <option value="llm" ${stratType==='llm'?'selected':''}>LLM（AI 模型）</option>
+          <option value="shell" ${stratType==='shell'?'selected':''}>Shell 脚本</option>
+          <option value="http" ${stratType==='http'?'selected':''}>HTTP 回调</option>
+        </select></div>
+        <div class="form-group"><label>AI 提供商</label><input name="strategy.provider" value="${esc(strat.provider||'deepseek')}"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>模型</label><input name="strategy.model" value="${esc(strat.model||'deepseek-chat')}"></div>
+        <div class="form-group"><label>API Key 环境变量名</label><input name="strategy.apiKeyEnv" value="${esc(strat.apiKeyEnv||'DEEPSEEK_API_KEY')}"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>系统提示词文件</label><input name="strategy.systemPromptFile" value="${esc(strat.systemPromptFile||'')}" placeholder="./prompts/pr-doc-system.md"></div>
+        <div class="form-group"><label>用户提示词模板文件</label><input name="strategy.userPromptTemplate" value="${esc(strat.userPromptTemplate||'')}" placeholder="./prompts/pr-doc-user.tpl"></div>
+      </div>
+      <div class="form-group"><label>允许修改的路径（逗号分隔）</label><input name="strategy.allowedPaths" value="${(strat.allowedPaths||[]).join(',')}" placeholder="CHANGELOG.md, docs/"></div>
+      <div class="form-group"><label>Workspace Skill 文件（仓库中的 skill 路径）</label><input name="strategy.workspaceSkillFile" value="${esc(strat.workspaceSkillFile||'')}" placeholder="skill/cc-prd-changelog/SKILL.md"></div>
+
+      ${isNew ? '' : `
+      <div class="form-section">提示词内容编辑</div>
+      <div class="form-group">
+        <label>系统提示词 <button type="button" class="btn btn-outline btn-sm" onclick="loadPrompts('${esc(route.name)}')" style="margin-left:8px;font-size:11px">加载提示词</button></label>
+        <textarea name="_systemPrompt" id="system-prompt-editor" rows="8" placeholder="点击"加载提示词"按钮加载内容" style="font-family:monospace;font-size:12px"></textarea>
+      </div>
+      <div class="form-group">
+        <label>用户提示词模板</label>
+        <textarea name="_userPrompt" id="user-prompt-editor" rows="8" placeholder="点击"加载提示词"按钮加载内容" style="font-family:monospace;font-size:12px"></textarea>
+      </div>
+      `}
+
+      <div class="form-section">提交设置</div>
+      <div class="form-row">
+        <div class="form-group"><label>提交信息模板</label><input name="commit.message" value="${esc(route.job?.commit?.message||'')}"></div>
+        <div class="form-group"><label>提交者名称</label><input name="commit.authorName" value="${esc(route.job?.commit?.author?.name||'')}"></div>
+      </div>
+      <div class="form-group"><label>提交者邮箱</label><input name="commit.authorEmail" value="${esc(route.job?.commit?.author?.email||'')}"></div>
+
+      <div class="form-section">防护设置</div>
+      <div class="form-row">
+        <div class="form-group"><label>幂等字段</label><input name="guard.idempotency" value="${esc(route.job?.guard?.idempotency||'pr.headSha')}"></div>
+        <div class="form-group"><label>跳过匹配（正则）</label><input name="guard.skipIfLastCommitMatches" value="${esc(route.job?.guard?.skipIfLastCommitMatches||'')}" placeholder="\\[bot:pr-doc\\]"></div>
+      </div>
+
+      <div class="form-actions">
+        <button type="button" class="btn btn-outline" onclick="closeModal()">取消</button>
+        <button type="submit" class="btn btn-primary">${isNew ? '创建' : '保存'}</button>
+      </div>
+    </form>
+  `);
+
+  if (!isNew) {
+    // Auto-load prompts for existing routes
+    setTimeout(() => loadPrompts(name), 200);
+  }
+
+  document.getElementById('route-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const data = buildRouteObject(fd, isNew ? null : name);
+    try {
+      if (isNew) {
+        await api('/api/routes', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) });
+        toast('路由已创建');
+      } else {
+        // Save route config
+        await api(`/api/routes/${encodeURIComponent(name)}`, { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) });
+        // Save prompt files
+        const sysPrompt = fd.get('_systemPrompt')?.toString() || '';
+        const usrPrompt = fd.get('_userPrompt')?.toString() || '';
+        if (sysPrompt || usrPrompt) {
+          await api(`/api/prompts/${encodeURIComponent(name)}`, {
+            method:'PUT', headers:{'Content-Type':'application/json'},
+            body:JSON.stringify({ systemPrompt: sysPrompt, userPrompt: usrPrompt })
+          });
+        }
+        toast('路由已更新');
+      }
+      closeModal();
+      navigate('routes');
+    } catch(err) { toast(err.message, 'error'); }
+  });
+}
+
+function buildRouteObject(fd, existingName) {
+  const get = (key) => fd.get(key)?.toString() || '';
+  const getArr = (key) => get(key).split(',').map(s=>s.trim()).filter(Boolean);
+  return {
+    name: get('name') || existingName,
+    path: get('path'), secret: get('secret'), provider: get('provider'),
+    events: getArr('events'),
+    rules: { actions: getArr('rules.actions'), targetBranches: getArr('rules.targetBranches'), ignoreSenders: getArr('rules.ignoreSenders') },
+    job: {
+      repo: get('repo'),
+      git: { branchFrom: 'pr.sourceBranch', baseFrom: 'pr.targetBranch' },
+      strategy: {
+        type: get('strategy.type'), provider: get('strategy.provider'), model: get('strategy.model'),
+        apiKeyEnv: get('strategy.apiKeyEnv'), baseUrlEnv: 'DEEPSEEK_BASE_URL',
+        systemPromptFile: get('strategy.systemPromptFile'), userPromptTemplate: get('strategy.userPromptTemplate'),
+        workspaceSkillFile: get('strategy.workspaceSkillFile'),
+        outputFormat: 'json', temperature: 0.3, maxTokens: 4096, timeoutSec: 300,
+        allowedPaths: getArr('strategy.allowedPaths'),
+      },
+      commit: { message: get('commit.message'), author: { name: get('commit.authorName'), email: get('commit.authorEmail') } },
+      guard: { idempotency: get('guard.idempotency'), skipIfLastCommitMatches: get('guard.skipIfLastCommitMatches') },
+      notify: { prComment: true },
+    },
+  };
+}
+
+async function deleteRoute(name) {
+  if (!confirm(`确定删除路由 "${name}"？`)) return;
+  try {
+    await api(`/api/routes/${encodeURIComponent(name)}`, { method:'DELETE' });
+    toast('路由已删除');
+    navigate('routes');
+  } catch(e) { toast(e.message, 'error'); }
+}
+
+// ====== 任务记录 ======
+async function jobs() {
+  const statusFilter = new URLSearchParams(location.hash.slice(1)).get('status') || '';
+  const page = parseInt(new URLSearchParams(location.hash.slice(1)).get('page') || '1');
+  const data = await api(`/api/jobs?limit=25${statusFilter ? '&status='+statusFilter : ''}&page=${page}`);
+  const rows = (data.jobs||[]).map(j => `
+    <tr>
+      <td><code style="font-size:11px" title="${j.trace_id}">${j.trace_id.slice(0,8)}...</code></td>
+      <td><strong>${esc(j.route)}</strong></td>
+      <td>${esc(j.repo)}#${j.pr_number}</td>
+      <td>${j.strategy_type}</td>
+      <td><span class="badge badge-${j.status}">${statusLabel(j.status)}</span></td>
+      <td>${fmtTime(j.created_at)}</td>
+      <td>${j.finished_at ? fmtDuration(j.created_at, j.finished_at) : '-'}</td>
+      <td><button class="btn btn-outline btn-sm" onclick="viewJob('${j.trace_id}')">详情</button></td>
+    </tr>`).join('');
+
+  const totalPages = data.pagination?.totalPages || 1;
+
+  return `
+    <div class="page active">
+      <div class="page-header"><h2>任务记录</h2><p>每次 Webhook 触发的执行历史</p></div>
+      <div class="filters">
+        <select onchange="filterJobs(this.value)">
+          <option value="">全部状态</option>
+          <option value="success" ${statusFilter==='success'?'selected':''}>成功</option>
+          <option value="failed" ${statusFilter==='failed'?'selected':''}>失败</option>
+          <option value="skipped" ${statusFilter==='skipped'?'selected':''}>已跳过</option>
+          <option value="running" ${statusFilter==='running'?'selected':''}>运行中</option>
+          <option value="pending" ${statusFilter==='pending'?'selected':''}>等待中</option>
+        </select>
+        <span style="color:var(--text-muted);font-size:12px">共 ${data.pagination?.total || 0} 条</span>
+        <button class="btn btn-outline btn-sm" onclick="navigate('jobs')">刷新</button>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead><tr><th>Trace ID</th><th>路由</th><th>仓库/PR</th><th>策略</th><th>状态</th><th>创建时间</th><th>耗时</th><th style="width:60px"></th></tr></thead>
+          <tbody>${rows || '<tr><td colspan="8" class="empty">暂无任务记录</td></tr>'}</tbody>
+        </table>
+      </div>
+      ${totalPages > 1 ? `<div class="pagination">
+        <button ${page<=1?'disabled':''} onclick="goPage(${page-1})">上一页</button>
+        <span>第 ${page} / ${totalPages} 页</span>
+        <button ${page>=totalPages?'disabled':''} onclick="goPage(${page+1})">下一页</button>
+      </div>` : ''}
+    </div>`;
+}
+
+function initJobs() {}
+function filterJobs(status) { location.hash = status ? `status=${status}` : ''; navigate('jobs'); }
+function goPage(p) {
+  const s = new URLSearchParams(location.hash.slice(1));
+  s.set('page', p);
+  location.hash = s.toString();
+  navigate('jobs');
+}
+
+async function viewJob(traceId) {
+  const j = await api(`/api/jobs/${traceId}`);
+  const result = j.raw_result ? JSON.parse(j.raw_result) : null;
+  openModal(`
+    <button class="modal-close" onclick="closeModal()">&times;</button>
+    <h3>任务详情</h3>
+    <div class="form-row">
+      <div class="form-group"><label>状态</label><span class="badge badge-${j.status}">${statusLabel(j.status)}</span></div>
+      <div class="form-group"><label>路由</label><p>${esc(j.route)}</p></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>仓库</label><p>${esc(j.repo)}</p></div>
+      <div class="form-group"><label>PR 编号</label><p>#${j.pr_number}</p></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>触发 SHA</label><code>${j.head_sha?.slice(0,12)||'-'}</code></div>
+      <div class="form-group"><label>提交 SHA</label><code>${j.commit_sha?.slice(0,12)||'-'}</code></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label>创建时间</label><p>${fmtTime(j.created_at)}</p></div>
+      <div class="form-group"><label>完成时间</label><p>${j.finished_at ? fmtTime(j.finished_at) : '进行中'}</p></div>
+    </div>
+    ${j.reason ? `<div class="form-group"><label>原因/说明</label><p>${esc(j.reason)}</p></div>` : ''}
+    ${result ? `<div class="form-group"><label>执行结果 (JSON)</label><pre class="json-view">${esc(JSON.stringify(result,null,2))}</pre></div>` : ''}
+  `);
+}
+
+// ====== 系统设置 ======
+async function settings() {
+  const config = await api('/api/config');
+  const envVars = await api('/api/config/env');
+  const envRows = envVars.map(e => `
+    <tr>
+      <td><code>${e.name}</code></td>
+      <td><span class="badge ${e.set ? 'badge-success' : 'badge-failed'}">${e.set ? '已设置' : '未设置'}</span></td>
+      <td><code>${e.preview || '-'}</code></td>
+    </tr>`).join('');
+
+  return `
+    <div class="page active">
+      <div class="page-header"><h2>系统设置</h2><p>服务器配置与环境变量状态</p></div>
+      <h3 style="margin-bottom:12px;font-size:15px">服务器</h3>
+      <div class="table-container" style="margin-bottom:24px">
+        <table>
+          <tr><td style="width:160px">端口</td><td><strong>${config.server?.port}</strong></td></tr>
+          <tr><td>工作区目录</td><td><code>${esc(config.workspace?.root)}</code></td></tr>
+        </table>
+      </div>
+      <h3 style="margin-bottom:12px;font-size:15px">环境变量</h3>
+      <div class="table-container">
+        <table>
+          <thead><tr><th>变量名</th><th>状态</th><th>预览</th></tr></thead>
+          <tbody>${envRows}</tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function initSettings() {}
+
+// ====== 工具函数 ======
+function esc(s) { if (!s) return ''; return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtTime(t) { if (!t) return '-'; const d = new Date(t + (t.endsWith('Z')?'':'Z')); return d.toLocaleString('zh-CN'); }
+function fmtDuration(start, end) { const ms = new Date(end + (end.endsWith('Z')?'':'Z')) - new Date(start + (start.endsWith('Z')?'':'Z')); if (ms < 1000) return `${ms}ms`; if (ms < 60000) return `${(ms/1000).toFixed(1)}s`; return `${Math.floor(ms/60000)}m ${Math.floor((ms%60000)/1000)}s`; }
+function statusLabel(s) { const map = {success:'成功',failed:'失败',skipped:'已跳过',running:'运行中',pending:'等待中'}; return map[s] || s; }
+
+function renderJobTable(jobs) {
+  const rows = jobs.map(j => `
+    <tr>
+      <td><code style="font-size:11px" title="${j.trace_id}">${j.trace_id.slice(0,8)}...</code></td>
+      <td><strong>${esc(j.route)}</strong></td>
+      <td>${esc(j.repo)}#${j.pr_number}</td>
+      <td><span class="badge badge-${j.status}">${statusLabel(j.status)}</span></td>
+      <td>${fmtTime(j.created_at)}</td>
+    </tr>`).join('');
+  return `<table>
+    <thead><tr><th>Trace ID</th><th>路由</th><th>仓库/PR</th><th>状态</th><th>创建时间</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5" class="empty">暂无任务记录</td></tr>'}</tbody>
+  </table>`;
+}
+
+// ====== 初始化 ======
+document.addEventListener('DOMContentLoaded', () => {
+  api('/healthz').then(h => {
+    document.getElementById('server-status').textContent = `状态: 运行中 | ${h.ts ? new Date(h.ts).toLocaleTimeString('zh-CN') : 'ok'}`;
+  }).catch(() => {
+    document.getElementById('server-status').textContent = '状态: 离线';
+  });
+  navigate('dashboard');
+});
+</script>
+</body>
+</html>

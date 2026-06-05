@@ -1,0 +1,51 @@
+server:
+  port: 8787
+workspace:
+  root: ./workspace
+routes:
+  - name: pr-doc
+    path: /webhook/gitee/pr-doc
+    secret: ${GITEE_WEBHOOK_SECRET}
+    provider: gitee
+    events:
+      - pull_request
+    rules:
+      actions:
+        - open
+        - update
+      targetBranches:
+        - master
+        - main
+      ignoreSenders:
+        - pr-enhance-bot
+    job:
+      repo: clougence/cc-auto-test
+      git:
+        branchFrom: pr.sourceBranch
+        baseFrom: pr.targetBranch
+      strategy:
+        type: llm
+        provider: deepseek
+        model: deepseek-v4-pro
+        apiKeyEnv: DEEPSEEK_API_KEY
+        baseUrlEnv: DEEPSEEK_BASE_URL
+        systemPromptFile: /Users/jim/code/other/pr-enhance-agent/prompts/pr-doc-system.md
+        userPromptTemplate: /Users/jim/code/other/pr-enhance-agent/prompts/pr-doc-user.tpl
+        workspaceSkillFile: skill/cc-prd-changelog/SKILL.md
+        outputFormat: json
+        temperature: 0.3
+        maxTokens: 16384
+        timeoutSec: 300
+        allowedPaths:
+          - PRD.md
+          - docs-site/changelog.md
+      commit:
+        message: '[bot] docs: update for PR #{{pr.number}} [bot:pr-doc]'
+        author:
+          name: PR Enhance Bot
+          email: bot@example.com
+      guard:
+        idempotency: pr.headSha
+        skipIfLastCommitMatches: "bot:pr-doc"
+      notify:
+        prComment: true
