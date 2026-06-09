@@ -1,0 +1,37 @@
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-8787}:8787"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-pr_enhance}:${POSTGRES_PASSWORD:-pr_enhance_secret}@postgres:5432/${POSTGRES_DB:-pr_enhance_agent}
+      - WORKSPACE_ROOT=${WORKSPACE_ROOT:-/app/workspace}
+    volumes:
+      - workspace_data:/app/workspace
+      - ./config/bot.yaml:/app/config/bot.yaml:ro
+      - ./prompts:/app/prompts:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-pr_enhance_agent}
+      POSTGRES_USER: ${POSTGRES_USER:-pr_enhance}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pr_enhance_secret}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pr_enhance} -d ${POSTGRES_DB:-pr_enhance_agent}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  workspace_data:
+  pgdata:

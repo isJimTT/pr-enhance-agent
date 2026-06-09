@@ -14,8 +14,9 @@ async function main() {
   // Load configuration
   const config = loadConfig();
 
-  // Apply env var override for port only (paths are resolved by config loader)
+  // Apply env var overrides
   if (process.env.PORT) config.server.port = parseInt(process.env.PORT, 10);
+  if (process.env.WORKSPACE_ROOT) config.workspace.root = process.env.WORKSPACE_ROOT;
 
   log.info(
     { routes: config.routes.length, workspace: config.workspace.root },

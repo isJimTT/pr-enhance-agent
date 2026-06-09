@@ -29,8 +29,8 @@ routes:
         model: deepseek-v4-pro
         apiKeyEnv: DEEPSEEK_API_KEY
         baseUrlEnv: DEEPSEEK_BASE_URL
-        systemPromptFile: /Users/jim/code/other/pr-enhance-agent/prompts/pr-doc-system.md
-        userPromptTemplate: /Users/jim/code/other/pr-enhance-agent/prompts/pr-doc-user.tpl
+        systemPromptFile: ./prompts/pr-doc-system.md
+        userPromptTemplate: ./prompts/pr-doc-user.tpl
         workspaceSkillFile: skill/cc-prd-changelog/SKILL.md
         outputFormat: json
         temperature: 0.3
