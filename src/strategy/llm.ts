@@ -151,7 +151,12 @@ export async function executeLlmStrategy(
       messages.push(choice.message);
 
       for (const tc of choice.message.tool_calls) {
-        const args = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
+        let args: Record<string, unknown> = {};
+        try {
+          args = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
+        } catch {
+          console.log(`[llm]   tool: ${tc.function.name} — invalid JSON args, using empty args`);
+        }
         const result = executeTool(tc.function.name, args, ctx);
         console.log(`[llm]   tool: ${tc.function.name}(${JSON.stringify(args)}) → ${result.length} chars`);
         messages.push({
@@ -174,7 +179,48 @@ export async function executeLlmStrategy(
   }
 
   // Parse output in delimiter-based format
-  const { action, patches, message } = parseOutput(rawOutput);
+  let { action, patches, message } = parseOutput(rawOutput);
+
+  // Retry: if parsing failed, ask LLM to reformat
+  if (action === "error" || action === "unknown") {
+    console.log(`[llm] Parse failed (action=${action}), sending correction prompt...`);
+    messages.push({ role: "assistant", content: rawOutput });
+    messages.push({ role: "user", content: CORRECTION_PROMPT });
+
+    try {
+      const retryResp = await client.chat.completions.create({
+        model: config.model,
+        temperature: 0,
+        max_tokens: config.maxTokens,
+        messages,
+        tool_choice: "none",
+      });
+      const retryOutput = retryResp.choices[0]?.message?.content ?? "";
+      console.log(`[llm] Retry response: ${retryOutput.length} chars`);
+      if (retryOutput) {
+        const reparsed = parseOutput(retryOutput);
+        if (reparsed.action !== "error" && reparsed.action !== "unknown") {
+          action = reparsed.action;
+          patches = reparsed.patches;
+          message = reparsed.message;
+          console.log(`[llm] Retry succeeded: action=${action}`);
+        } else {
+          console.log(`[llm] Retry parse also failed, trying natural language fallback...`);
+          const fallback = parseNaturalLanguage(retryOutput, config.allowedPaths);
+          if (fallback) return fallback;
+        }
+      }
+    } catch (err: unknown) {
+      console.log(`[llm] Retry call failed: ${(err as Error).message}`);
+      // Fall through to try natural language on original output
+    }
+
+    // Fallback: try natural language extraction on the original output
+    if (action === "error" || action === "unknown") {
+      const fallback = parseNaturalLanguage(rawOutput, config.allowedPaths);
+      if (fallback) return fallback;
+    }
+  }
 
   if (action === "error") {
     return { action: "error", reason: message ?? "Failed to parse LLM output" };
@@ -190,6 +236,27 @@ export async function executeLlmStrategy(
 
   return { action: "error", reason: `Failed to parse LLM output. Raw: ${rawOutput.slice(0, 300)}` };
 }
+
+const CORRECTION_PROMPT = `Your last response was NOT in the required format and caused a parse error.
+
+You MUST output using ONLY the exact delimiters below. No preamble, no analysis, no markdown code blocks. The first line MUST be ACTION:.
+
+For changes:
+ACTION: patch
+
+---FILE:path/to/file.md---
+HEADING: Section Name
+CONTENT:
+Updated section content here...
+---END---
+
+MESSAGE: Brief summary
+
+For no changes:
+ACTION: no_change
+MESSAGE: reason
+
+Reformat your previous analysis using EXACTLY this format now.`;
 
 function parseOutput(raw: string): {
   action: string;
@@ -239,4 +306,165 @@ function parseOutput(raw: string): {
   }
 
   return { action, patches: patches.length > 0 ? patches : undefined, message };
+}
+
+// --- Natural language fallback parser ---
+
+const NO_CHANGE_PATTERNS: RegExp[] = [
+  /no\s+(changes?|updates?|modifications?)\s+(needed|required|necessary)/i,
+  /does\s+not\s+(need|require)\s+(any\s+)?(changes?|updates?|modifications?)/i,
+  /不需(要)?(修改|更新|变更|改动)/,
+  /无需(修改|更新|变更|改动|\w*任何\w*(修改|更新|变更|改动))/,
+  /already\s+(up[-\s]?to[-\s]?date|current)/i,
+  /no\s+(documentation|doc)\s+(changes?|updates?)\s+(needed|required)/i,
+  /文档已经?(是最新|无需|不需要?|没有需要)/,
+  /(should|can)\s+(be\s+)?(skip|ignore)/i,
+];
+
+function parseNaturalLanguage(
+  raw: string,
+  allowedPaths?: string[],
+): StrategyResult | null {
+  const text = raw.trim();
+  if (!text) return null;
+
+  // Check for "no change" intent
+  const hasNoChange = NO_CHANGE_PATTERNS.some((p) => p.test(text));
+  const hasCodeBlock = /```[\s\S]*?```/.test(text);
+
+  if (hasNoChange && !hasCodeBlock) {
+    return { action: "no_change", reason: "Natural language indicates no changes needed" };
+  }
+
+  // Find which allowed paths are mentioned in the text
+  const paths = allowedPaths ?? [];
+  const mentionedPaths = paths.filter(
+    (p) =>
+      text.includes(p) || text.includes(p.split("/").pop() ?? p),
+  );
+
+  if (mentionedPaths.length === 0) return null;
+
+  // Extract patches: look for code blocks containing markdown headings
+  // Each code block likely contains proposed content for a file
+  const patches = extractPatchesFromNaturalLanguage(text, mentionedPaths);
+
+  return patches.length > 0
+    ? { action: "patch", patches, message: "Extracted from natural language (fallback)" }
+    : null;
+}
+
+function extractPatchesFromNaturalLanguage(
+  text: string,
+  mentionedPaths: string[],
+): { path: string; sections: { heading: string; newContent: string }[] }[] {
+  const result: { path: string; sections: { heading: string; newContent: string }[] }[] = [];
+
+  // Find all markdown code blocks — these likely contain proposed content
+  const codeBlockRegex = /```(?:markdown|md)?\n([\s\S]*?)```/g;
+  const codeBlocks: string[] = [];
+  let cm: RegExpExecArray | null;
+  while ((cm = codeBlockRegex.exec(text)) !== null) {
+    codeBlocks.push(cm[1].trim());
+  }
+
+  if (codeBlocks.length === 0) {
+    // Try to find content between triple-backtick fences without language tag
+    // or indented blocks that look like markdown
+    const fenceRegex = /```\n?([\s\S]*?)```/g;
+    while ((cm = fenceRegex.exec(text)) !== null) {
+      const content = cm[1].trim();
+      if (content.length > 10) codeBlocks.push(content);
+    }
+  }
+
+  if (codeBlocks.length === 0) return result;
+
+  // Map code blocks to files based on proximity in text
+  // For simplicity: if only one file and one code block, pair them
+  // If multiple, try to map by file name proximity
+  if (mentionedPaths.length === 1 && codeBlocks.length >= 1) {
+    const sections = extractHeadingsFromContent(codeBlocks[0]);
+    if (sections.length > 0) {
+      result.push({ path: mentionedPaths[0], sections });
+    }
+  } else {
+    // Try to map each code block to the closest mentioned file
+    const usedPaths = new Set<string>();
+    for (const block of codeBlocks) {
+      // Find the block position in text
+      const blockIdx = text.indexOf(block);
+      if (blockIdx < 0) continue;
+
+      // Find closest mentioned path before this block
+      let closestPath = "";
+      let closestDist = Infinity;
+      for (const p of mentionedPaths) {
+        const pIdx = text.lastIndexOf(p, blockIdx);
+        if (pIdx >= 0 && blockIdx - pIdx < closestDist) {
+          closestDist = blockIdx - pIdx;
+          closestPath = p;
+        }
+      }
+      if (!closestPath) closestPath = mentionedPaths[0];
+
+      const sections = extractHeadingsFromContent(block);
+      if (sections.length > 0) {
+        // Merge into existing file entry if already present
+        const existing = result.find((r) => r.path === closestPath);
+        if (existing) {
+          existing.sections.push(...sections);
+        } else {
+          result.push({ path: closestPath, sections });
+          usedPaths.add(closestPath);
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+function extractHeadingsFromContent(
+  content: string,
+): { heading: string; newContent: string }[] {
+  const sections: { heading: string; newContent: string }[] = [];
+
+  // Split content by markdown headings: ## Section or ### Section
+  const headingSplitRegex = /^(#{1,4})\s+(.+)$/gm;
+  const matches: { index: number; end: number; level: string; heading: string }[] = [];
+  let hm: RegExpExecArray | null;
+
+  while ((hm = headingSplitRegex.exec(content)) !== null) {
+    matches.push({
+      index: hm.index,
+      end: hm.index + hm[0].length,
+      level: hm[1],
+      heading: hm[2].trim(),
+    });
+  }
+
+  for (let i = 0; i < matches.length; i++) {
+    const start = matches[i].end + 1; // after heading line
+    const end = i + 1 < matches.length ? matches[i + 1].index : content.length;
+    const body = content.slice(start, end).trim();
+    if (body.length > 5) {
+      sections.push({ heading: matches[i].heading, newContent: body });
+    }
+  }
+
+  // If no headings found but content looks like a single section,
+  // try to identify a heading from the first line
+  if (sections.length === 0 && content.length > 10) {
+    const firstLine = content.split("\n")[0].trim();
+    const headingMatch = firstLine.match(/^#{1,4}\s+(.+)/);
+    if (headingMatch) {
+      const body = content.slice(firstLine.length + 1).trim();
+      if (body.length > 5) {
+        sections.push({ heading: headingMatch[1].trim(), newContent: body });
+      }
+    }
+  }
+
+  return sections;
 }
