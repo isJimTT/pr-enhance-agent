@@ -203,6 +203,7 @@ export async function executeLlmStrategy(
           action = reparsed.action;
           patches = reparsed.patches;
           message = reparsed.message;
+          rawOutput = retryOutput;
           console.log(`[llm] Retry succeeded: action=${action}`);
         } else {
           console.log(`[llm] Retry parse also failed, trying natural language fallback...`);
@@ -231,7 +232,7 @@ export async function executeLlmStrategy(
   }
 
   if (action === "patch" && patches) {
-    return { action: "patch", patches, message };
+    return { action: "patch", patches, message, rawOutput };
   }
 
   return { action: "error", reason: `Failed to parse LLM output. Raw: ${rawOutput.slice(0, 300)}` };
@@ -467,4 +468,134 @@ function extractHeadingsFromContent(
   }
 
   return sections;
+}
+
+// --- Content correction: called when the pre-push validator rejects merged output ---
+
+export interface CorrectionIssue {
+  path: string;
+  type: string;
+  detail: string;
+}
+
+export async function correctLlmOutput(
+  config: LlmStrategyConfig,
+  rawOutput: string,
+  issues: CorrectionIssue[],
+  workspaceDir: string,
+): Promise<StrategyResult> {
+  const apiKey = process.env[config.apiKeyEnv];
+  if (!apiKey) {
+    return {
+      action: "error",
+      reason: `API key env var '${config.apiKeyEnv}' is not set`,
+    };
+  }
+
+  const baseURL = process.env[config.baseUrlEnv] ?? "https://api.deepseek.com";
+  const client = new OpenAI({ apiKey, baseURL: baseURL + "/v1" });
+
+  let systemPrompt: string;
+  try {
+    systemPrompt = readFileSync(config.systemPromptFile, "utf-8");
+  } catch (err: unknown) {
+    return { action: "error", reason: `Failed to read system prompt: ${(err as Error).message}` };
+  }
+
+  if (config.workspaceSkillFile) {
+    const skillPath = join(workspaceDir, config.workspaceSkillFile);
+    if (existsSync(skillPath)) {
+      try {
+        const skillContent = readFileSync(skillPath, "utf-8");
+        systemPrompt += `\n\n---\n## Project Skill\n\n${skillContent}`;
+      } catch { /* ignore */ }
+    }
+  }
+
+  const issueList = issues
+    .map((i) => `- [${i.type}] ${i.path}: ${i.detail}`)
+    .join("\n");
+
+  const correctionPrompt = `Your previous output passed format parsing but was REJECTED by the content validator after merging with existing files. The merged file had these problems:
+
+${issueList}
+
+Your original output:
+\`\`\`
+${rawOutput}
+\`\`\`
+
+Fix each problem:
+- **duplicate_heading**: You output the same HEADING block more than once. Keep only one. If you're adding to an existing month, output the month heading once with ONLY the new bullets.
+- **duplicate_content**: You copied existing content into CONTENT. Remove any bullets/lines that already exist in the file. CONTENT = ONLY new entries.
+- **size_anomaly**: Your CONTENT is too large (the file grew too much). Reduce to ONLY the genuinely new entries — never include existing content.
+- **llm_artifact**: Raw format markers (ACTION:, ---FILE:, HEADING:, CONTENT:) leaked into CONTENT. Remove them — these are format delimiters, not content.
+- **structure_broken**: The changelog structure is damaged. Month headings MUST be "## YYYY-MM" format. Page header must be preserved.
+
+Output in the correct format. NO preamble. First line MUST be ACTION:.
+
+ACTION: patch
+
+---FILE:path/to/file.md---
+HEADING: Section Name
+CONTENT:
+Only new content here — do NOT include existing bullets...
+---END---
+
+MESSAGE: Brief summary
+
+If the fix reveals no actual changes are needed:
+ACTION: no_change
+MESSAGE: reason`;
+
+  console.log(`[llm] Content correction: issues=${issues.length} prompt=${correctionPrompt.length} chars`);
+
+  try {
+    const response = await client.chat.completions.create({
+      model: config.model,
+      temperature: 0,
+      max_tokens: config.maxTokens,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: correctionPrompt },
+      ],
+      tool_choice: "none",
+    });
+
+    const corrected = response.choices[0]?.message?.content ?? "";
+    console.log(`[llm] Correction response: ${corrected.length} chars`);
+
+    if (!corrected) {
+      return { action: "error", reason: "LLM returned empty correction response" };
+    }
+
+    const { action, patches, message } = parseOutput(corrected);
+
+    if (action === "error" || action === "unknown") {
+      const fallback = parseNaturalLanguage(corrected, config.allowedPaths);
+      if (fallback) return fallback;
+      return {
+        action: "error",
+        reason: `Failed to parse corrected output. Raw: ${corrected.slice(0, 200)}`,
+      };
+    }
+
+    if (action === "no_change") {
+      return { action: "no_change", reason: message ?? "Correction resulted in no changes" };
+    }
+
+    if (action === "patch" && patches && patches.length > 0) {
+      return { action: "patch", patches, message: message ?? "Corrected", rawOutput: corrected };
+    }
+
+    return {
+      action: "error",
+      reason: `Failed to parse corrected output. Raw: ${corrected.slice(0, 200)}`,
+    };
+  } catch (err: unknown) {
+    return {
+      action: "error",
+      reason: `Correction call failed: ${(err as Error).message}`,
+    };
+  }
 }

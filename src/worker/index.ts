@@ -13,6 +13,9 @@ import {
   checkLastCommitMarker,
   filterAllowedPaths,
 } from "../guard/index.js";
+import { validateFile, isChangelogFile } from "../guard/validator.js";
+import { correctLlmOutput } from "../strategy/llm.js";
+import type { CorrectionIssue } from "../strategy/llm.js";
 import { notifyPrComment } from "../notify/index.js";
 import { getLogger } from "../logger.js";
 
@@ -322,81 +325,193 @@ async function executeJob(
     return;
   }
 
-  // --- Handle patch action: merge patches into existing files ---
+  // --- Handle patch action: merge + validate with correction retry ---
+  let finalMessage = strategyResult.message;
   if (strategyResult.action === "patch") {
-    const mergedFiles: { path: string; content: string }[] = [];
-    for (const patch of strategyResult.patches) {
-      const existingPath = join(workspaceDir, patch.path);
-      let fileContent = "";
-      try {
-        fileContent = readFileSync(existingPath, "utf-8");
-      } catch {
-        log.warn({ path: patch.path }, "Patch target file not found, skipping");
-        continue;
+    let currentPatches = strategyResult.patches;
+    let currentRawOutput = strategyResult.rawOutput;
+    const MAX_CORRECTIONS = 2;
+    let finalFiles: { path: string; content: string }[] | null = null;
+
+    for (let attempt = 0; attempt <= MAX_CORRECTIONS; attempt++) {
+      if (attempt > 0) {
+        log.info({ ...logCtx, attempt }, "Retrying merge after LLM correction");
       }
 
-      for (const section of patch.sections) {
-        const heading = section.heading;
-        const newContent = section.newContent;
+      // Merge patches into files (re-read from disk each attempt)
+      const mergedFiles: { path: string; content: string }[] = [];
+      for (const patch of currentPatches) {
+        const existingPath = join(workspaceDir, patch.path);
+        let fileContent = "";
+        try {
+          fileContent = readFileSync(existingPath, "utf-8");
+        } catch {
+          log.warn({ path: patch.path }, "Patch target file not found, skipping");
+          continue;
+        }
 
-        const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-        let matched = false;
+        for (const section of patch.sections) {
+          const heading = section.heading;
+          const newContent = section.newContent;
 
-        // Build patterns to find "HEADING\n...content...\n\nNEXT_HEADING"
-        // Match from heading line to next heading or end of file
-        const patterns = [
-          // Markdown: ## HEADING\n...until next ## or --- or end
-          new RegExp(
-            `(#{1,4}\\s*${escaped}[^\\n]*\\n)([\\s\\S]*?)(?=\\n#{1,4}\\s|\\n---\\n|$(?![\\s\\S]))`,
-            "i",
-          ),
-          // Plain: HEADING\n...until next heading-like line or end
-          new RegExp(
-            `(^${escaped}[^\\n]*\\n)([\\s\\S]*?)(?=\\n(?:#{1,4}\\s|\\d{4}-\\d{2}\\b|[A-Z][a-z].{2,40}\\n[-=])|$(?![\\s\\S]))`,
-            "im",
-          ),
-        ];
+          const escaped = heading.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          let matched = false;
 
-        for (const regex of patterns) {
-          const match = fileContent.match(regex);
-          if (match && match[2]) {
-            fileContent = fileContent.replace(match[0], `${match[1]}${newContent}\n`);
-            matched = true;
-            log.info({ path: patch.path, heading }, "Section updated");
-            break;
+          if (isChangelogFile(patch.path)) {
+            const sectionRegex = new RegExp(
+              `(#{1,4}\\s+${escaped}[^\\n]*\\n)([\\s\\S]*?)(?=\\n#{1,4}\\s|$(?![\\s\\S]))`,
+              "i",
+            );
+            const m = fileContent.match(sectionRegex);
+            if (m) {
+              const headingLine = m[1];
+              const existingBody = m[2].replace(/\n?$/, "");
+              const appendix = existingBody ? `\n${newContent}` : newContent;
+              fileContent = fileContent.replace(m[0], `${headingLine}${existingBody}${appendix}\n`);
+              matched = true;
+              log.info({ path: patch.path, heading }, "Changelog section appended");
+            }
+          } else {
+            const patterns = [
+              new RegExp(
+                `(#{1,4}\\s*${escaped}[^\\n]*\\n)([\\s\\S]*?)(?=\\n#{1,4}\\s|\\n---\\n|$(?![\\s\\S]))`,
+                "i",
+              ),
+              new RegExp(
+                `(^${escaped}[^\\n]*\\n)([\\s\\S]*?)(?=\\n(?:#{1,4}\\s|\\d{4}-\\d{2}\\b|[A-Z][a-z].{2,40}\\n[-=])|$(?![\\s\\S]))`,
+                "im",
+              ),
+            ];
+
+            for (const regex of patterns) {
+              const m = fileContent.match(regex);
+              if (m && m[2]) {
+                fileContent = fileContent.replace(m[0], `${m[1]}${newContent}\n`);
+                matched = true;
+                log.info({ path: patch.path, heading }, "Section updated");
+                break;
+              }
+            }
+          }
+
+          if (!matched) {
+            const sep = fileContent.endsWith("\n") ? "\n" : "\n\n";
+            fileContent += `${sep}${heading}\n${newContent}\n`;
+            log.info({ path: patch.path, heading }, "Section appended");
           }
         }
+        mergedFiles.push({ path: patch.path, content: fileContent });
+      }
 
-        if (!matched) {
-          // Heading not found, append at end
-          const sep = fileContent.endsWith("\n") ? "\n" : "\n\n";
-          fileContent += `${sep}${heading}\n${newContent}\n`;
-          log.info({ path: patch.path, heading }, "Section appended");
+      // Filter by path whitelist
+      const { allowed, blocked } = filterAllowedPaths(mergedFiles, allowedPaths);
+      if (blocked.length > 0) {
+        log.info({ ...logCtx, blocked }, "Some files filtered by whitelist");
+      }
+      if (allowed.length === 0) {
+        await updateJobStatus(traceId, "skipped", {
+          reason: `All files blocked by whitelist: ${blocked.join("; ")}`,
+        });
+        return;
+      }
+
+      // Validate merged content
+      const validationIssues: CorrectionIssue[] = [];
+      for (const file of allowed) {
+        const original = targetFiles.find((tf) => tf.path === file.path);
+        const result = validateFile({
+          path: file.path,
+          content: file.content,
+          originalContent: original?.currentContent ?? "",
+        });
+        if (!result.valid) {
+          for (const issue of result.issues) {
+            validationIssues.push({
+              path: issue.path,
+              type: issue.type,
+              detail: issue.detail,
+            });
+          }
         }
       }
-      mergedFiles.push({ path: patch.path, content: fileContent });
-    }
-    strategyResult = {
-      action: "update",
-      files: mergedFiles,
-      message: strategyResult.message ?? "Patch applied",
-    };
-  }
 
-  // --- Filter by path whitelist ---
-  if (strategyResult.files.length > 0) {
-    const { allowed, blocked } = filterAllowedPaths(strategyResult.files, allowedPaths);
-    if (blocked.length > 0) {
-      log.info({ ...logCtx, blocked }, "Some files filtered by whitelist");
-    }
-    if (allowed.length === 0) {
-      await updateJobStatus(traceId, "skipped", {
-        reason: `All files blocked by whitelist: ${blocked.join("; ")}`,
+      if (validationIssues.length === 0) {
+        // Validation passed
+        finalFiles = allowed;
+        if (strategyResult.message) finalMessage = strategyResult.message;
+        break;
+      }
+
+      // Validation failed — try LLM correction
+      log.warn(
+        { ...logCtx, attempt, issueCount: validationIssues.length },
+        "Content validation failed",
+      );
+
+      if (
+        attempt < MAX_CORRECTIONS &&
+        route.job.strategy.type === "llm" &&
+        currentRawOutput
+      ) {
+        log.info({ ...logCtx, attempt }, "Attempting LLM content correction...");
+        const correctionResult = await correctLlmOutput(
+          route.job.strategy,
+          currentRawOutput,
+          validationIssues,
+          workspaceDir,
+        );
+
+        if (
+          correctionResult.action === "patch" &&
+          correctionResult.patches &&
+          correctionResult.patches.length > 0
+        ) {
+          currentPatches = correctionResult.patches;
+          currentRawOutput = correctionResult.rawOutput;
+          log.info(
+            { ...logCtx, attempt },
+            `Correction returned ${correctionResult.patches.length} patches, re-merging`,
+          );
+          continue;
+        }
+
+        if (correctionResult.action === "no_change") {
+          await updateJobStatus(traceId, "skipped", {
+            reason: correctionResult.reason ?? "Correction determined no changes needed",
+          });
+          return;
+        }
+
+        log.error(
+          { ...logCtx, correctionResult: correctionResult.action },
+          "LLM correction failed, will not retry",
+        );
+      }
+
+      // Cannot correct — fail the job
+      log.error(
+        { ...logCtx, issues: validationIssues, attempt },
+        "Pre-push validation failed after correction attempts — blocking commit",
+      );
+      await updateJobStatus(traceId, "failed", {
+        reason: `Content validation failed after ${attempt + 1} attempt(s): ${validationIssues.map((i) => `[${i.type}] ${i.detail}`).join("; ")}`,
+      });
+      await notifyPrComment(route, payload, traceId, {
+        action: "error",
+        reason: `Pre-push content validation failed after ${attempt + 1} correction attempt(s):\n\n${validationIssues.map((i) => `- **${i.type}** (${i.path}): ${i.detail}`).join("\n")}`,
       });
       return;
     }
-    // Only apply allowed files
-    strategyResult.files = allowed;
+
+    if (!finalFiles) {
+      return; // Should not reach here, but guard
+    }
+
+    strategyResult = {
+      action: "update",
+      files: finalFiles,
+      message: finalMessage ?? "Patch applied",
+    };
   }
 
   // --- Clean up temp files before applying changes ---

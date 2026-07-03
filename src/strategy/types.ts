@@ -42,6 +42,7 @@ export type StrategyResult =
       action: "patch";
       patches: { path: string; sections: { heading: string; newContent: string }[] }[];
       message?: string;
+      rawOutput?: string;
     }
   | { action: "no_change"; reason: string }
   | { action: "error"; reason: string };

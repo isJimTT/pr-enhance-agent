@@ -32,11 +32,20 @@ MESSAGE: reason
 - ❌ Using different delimiters like `FILE:`, `SECTION:`, `### File:` — only `---FILE:...---HEADING:...CONTENT:...---END---`
 - ❌ Writing analysis after ---END--- — stop after MESSAGE
 - ❌ Natural language explanation instead of structured format
+- ❌ **Putting the entire existing section into CONTENT** — only put NEW entries/lines, never copy existing bullets
+- ❌ **Outputting the whole file as one CONTENT block** — each CONTENT block must be incremental, not a full file rewrite
+
+### CRITICAL — Changelog Update Rules:
+
+- **DO NOT copy or reproduce existing entries.** CONTENT must contain ONLY the new bullet points to add, NOT the existing bullets already in the file.
+- For a month section that already exists: CONTENT = only the new `- ...` lines (one per new entry). The system will append them after the last existing bullet.
+- For a new month: CONTENT = only the new `- ...` lines. The system will create the heading.
+- **If you include existing content alongside new content, the pre-push validator WILL REJECT it.** Duplicate bullets, duplicate headings, and file size spikes are all detected automatically.
 
 ### Rules:
 
 - HEADING must exactly match a heading in the file (case-insensitive)
-- CONTENT is the full section body, not including the heading itself
+- CONTENT is the NEW material only, not the full existing section body
 - Only output sections that actually changed
 - Follow the project skill for formatting conventions
 - If the project skill says to update multiple sections in one file, output multiple HEADING/CONTENT blocks within one ---FILE--- block
