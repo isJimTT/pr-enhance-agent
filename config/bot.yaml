@@ -39,6 +39,15 @@ routes:
         allowedPaths:
           - PRD.md
           - docs-site/changelog.md
+        excludeDiffPatterns:
+          - "**/package-lock.json"
+          - "**/yarn.lock"
+          - "**/pnpm-lock.yaml"
+          - "**/node_modules/**"
+          - "**/dist/**"
+          - "**/build/**"
+          - "**/.next/**"
+          - "**/*.lock"
       commit:
         message: '[bot] docs: update for PR #{{pr.number}} [bot:pr-doc]'
         author:

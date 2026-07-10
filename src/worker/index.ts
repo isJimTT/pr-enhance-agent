@@ -19,6 +19,86 @@ import type { CorrectionIssue } from "../strategy/llm.js";
 import { notifyPrComment } from "../notify/index.js";
 import { getLogger } from "../logger.js";
 
+// --- Merge helpers ---
+
+/** Case-insensitive search for heading text anywhere in file content. */
+function headingTextExists(content: string, heading: string): boolean {
+  const normalizedHeading = heading.trim().toLowerCase();
+  return content.toLowerCase().includes(normalizedHeading);
+}
+
+/**
+ * Fuzzy find a heading in file content. Returns the byte offset of the line
+ * containing the heading, or -1 if not found. Matches headings with or without
+ * leading `#` markers and optional whitespace.
+ */
+function findHeadingFuzzy(content: string, heading: string): number {
+  const normalized = heading.trim().toLowerCase();
+  const lines = content.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const stripped = lines[i].replace(/^#{1,6}\s*/, "").trim().toLowerCase();
+    if (stripped === normalized || stripped.startsWith(normalized)) {
+      // Calculate byte offset to the start of this line
+      let offset = 0;
+      for (let j = 0; j < i; j++) offset += lines[j].length + 1;
+      return offset;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Given the byte offset of a heading line, return the byte offset of the
+ * end of that section (right before the next heading of equal or higher level,
+ * or end of content).
+ */
+function findSectionEnd(content: string, headingOffset: number): number {
+  const lines = content.split("\n");
+  // Find which line the heading is on
+  let startLine = 0;
+  let byteCount = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (byteCount === headingOffset) {
+      startLine = i;
+      break;
+    }
+    byteCount += lines[i].length + 1;
+  }
+
+  // Determine heading level from the heading line
+  const headingLine = lines[startLine];
+  const levelMatch = headingLine.match(/^(#{1,6})/);
+  const level = levelMatch ? levelMatch[1].length : 0;
+
+  // Find next heading of equal or higher level (lower number)
+  let endByte = content.length;
+  byteCount = headingOffset + headingLine.length + 1;
+  for (let i = startLine + 1; i < lines.length; i++) {
+    const nextMatch = lines[i].match(/^(#{1,6})\s/);
+    if (nextMatch && nextMatch[1].length <= (level || 2)) {
+      endByte = byteCount;
+      break;
+    }
+    byteCount += lines[i].length + 1;
+  }
+
+  return endByte;
+}
+
+/**
+ * Check if newContent looks like a full section rewrite rather than an
+ * incremental addition. True if newContent contains headings that already
+ * exist in the existing body — the LLM rewrote the whole section.
+ */
+function isFullRewrite(existingBody: string, newContent: string): boolean {
+  const existingHeadings = new Set(
+    [...existingBody.matchAll(/^(#{1,6})\s+(.+)$/gm)].map((m) => m[2].trim().toLowerCase()),
+  );
+  if (existingHeadings.size === 0) return false;
+  const newHeadings = [...newContent.matchAll(/^(#{1,6})\s+(.+)$/gm)].map((m) => m[2].trim().toLowerCase());
+  return newHeadings.some((h) => existingHeadings.has(h));
+}
+
 const log = getLogger("worker");
 
 const globalEmitter = new EventEmitter();
@@ -371,6 +451,19 @@ async function executeJob(
               matched = true;
               log.info({ path: patch.path, heading }, "Changelog section appended");
             }
+            // Fuzzy fallback for changelog: strip ## prefix from heading and search
+            if (!matched) {
+              const fuzzyIdx = findHeadingFuzzy(fileContent, heading);
+              if (fuzzyIdx >= 0) {
+                const afterSection = findSectionEnd(fileContent, fuzzyIdx);
+                const before = fileContent.slice(0, afterSection);
+                const after = fileContent.slice(afterSection);
+                const sep = before.endsWith("\n") ? "" : "\n";
+                fileContent = `${before}${sep}${newContent}\n${after}`;
+                matched = true;
+                log.info({ path: patch.path, heading }, "Changelog section appended (fuzzy match)");
+              }
+            }
           } else {
             const patterns = [
               new RegExp(
@@ -386,15 +479,46 @@ async function executeJob(
             for (const regex of patterns) {
               const m = fileContent.match(regex);
               if (m && m[2]) {
-                fileContent = fileContent.replace(m[0], `${m[1]}${newContent}\n`);
+                const existingBody = m[2].replace(/\n?$/, "");
+                if (isFullRewrite(existingBody, newContent)) {
+                  // LLM rewrote the entire section → replace old body
+                  fileContent = fileContent.replace(m[0], `${m[1]}${newContent}\n`);
+                } else {
+                  // Incremental addition → append to existing body
+                  const appendix = existingBody ? `\n${newContent}` : newContent;
+                  fileContent = fileContent.replace(m[0], `${m[1]}${existingBody}${appendix}\n`);
+                }
                 matched = true;
                 log.info({ path: patch.path, heading }, "Section updated");
                 break;
               }
             }
+
+            // If regex failed, try fuzzy search: look for the heading text anywhere in the file
+            if (!matched) {
+              const fuzzyIdx = findHeadingFuzzy(fileContent, heading);
+              if (fuzzyIdx >= 0) {
+                // Insert newContent after the last non-empty line under this heading,
+                // before the next heading or end of file.
+                const afterSection = findSectionEnd(fileContent, fuzzyIdx);
+                const before = fileContent.slice(0, afterSection);
+                const after = fileContent.slice(afterSection);
+                const sep = before.endsWith("\n") ? "" : "\n";
+                fileContent = `${before}${sep}${newContent}\n${after}`;
+                matched = true;
+                log.info({ path: patch.path, heading }, "Section updated (fuzzy match)");
+              }
+            }
           }
 
           if (!matched) {
+            // Safety check: if heading text already exists anywhere in the file,
+            // do NOT append — the regex/fuzzy search should have caught it.
+            // This prevents compounding duplicates across bot runs.
+            if (headingTextExists(fileContent, heading)) {
+              log.warn({ path: patch.path, heading }, "Heading exists but merge failed to locate section — skipping to avoid duplicate");
+              continue;
+            }
             const sep = fileContent.endsWith("\n") ? "\n" : "\n\n";
             fileContent += `${sep}${heading}\n${newContent}\n`;
             log.info({ path: patch.path, heading }, "Section appended");
@@ -484,8 +608,12 @@ async function executeJob(
 
         log.error(
           { ...logCtx, correctionResult: correctionResult.action },
-          "LLM correction failed, will not retry",
+          "LLM correction returned error, will retry",
         );
+        // Continue loop: transient LLM errors (network, garbled output) deserve a retry.
+        // The system prompt fix for correction mode should prevent the most common cause
+        // (tool_choice conflict with workflow instructions).
+        continue;
       }
 
       // Cannot correct — fail the job

@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import { resolve, dirname } from "node:path";
+import { resolve } from "node:path";
 import yaml from "js-yaml";
 import { z } from "zod";
 
@@ -45,6 +45,16 @@ const strategyLlmSchema = z.object({
   maxTokens: z.number().default(4096),
   timeoutSec: z.number().default(300),
   allowedPaths: z.array(z.string()).default(["CHANGELOG.md"]),
+  excludeDiffPatterns: z.array(z.string()).default([
+    "**/package-lock.json",
+    "**/yarn.lock",
+    "**/pnpm-lock.yaml",
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/.next/**",
+    "**/*.lock",
+  ]),
 });
 
 const strategySchema = z.discriminatedUnion("type", [
@@ -181,8 +191,8 @@ export function loadConfig(configPath?: string): BotConfig {
   if (!config.workspace.root.startsWith("/")) {
     config.workspace.root = resolve(cwd, config.workspace.root);
   }
-  // Resolve prompt file paths relative to config file directory
-  const configDir = dirname(resolve(path));
+  // Resolve prompt file paths relative to CWD (project root), not config directory
+  const configDir = cwd;
   for (const route of config.routes) {
     if (route.job.strategy.type === "llm") {
       if (!route.job.strategy.systemPromptFile.startsWith("/")) {

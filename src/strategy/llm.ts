@@ -1,8 +1,48 @@
 import { readFileSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import OpenAI from "openai";
 import type { LlmStrategyConfig } from "../config.js";
 import type { StrategyContext, StrategyResult } from "./types.js";
+
+// Split a unified diff into per-file chunks and exclude files matching glob patterns.
+// Supports ** (any depth) and * (single segment) wildcards.
+function matchesGlob(filePath: string, pattern: string): boolean {
+  const regex = new RegExp(
+    "^" +
+    pattern
+      .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+      .replace(/\*\*\/?/g, "<<<GLOBSTAR>>>")
+      .replace(/\*/g, "[^/]*")
+      .replace(/<<<GLOBSTAR>>>/g, "(.*/)?")
+    + "$",
+  );
+  return regex.test(filePath);
+}
+
+function filterDiff(diff: string, excludePatterns: string[]): string {
+  if (!excludePatterns || excludePatterns.length === 0) return diff;
+
+  const chunks = diff.split(/(?=^diff --git )/m);
+  const kept: string[] = [];
+
+  for (const chunk of chunks) {
+    const match = chunk.match(/^diff --git a\/(.+?) b\//m);
+    if (!match) {
+      // Header chunk or no file path — keep it
+      if (kept.length === 0 && !chunk.startsWith("diff --git")) {
+        kept.push(chunk);
+      }
+      continue;
+    }
+    const filePath = match[1];
+    const excluded = excludePatterns.some((p) => matchesGlob(filePath, p));
+    if (!excluded) {
+      kept.push(chunk);
+    }
+  }
+
+  return kept.join("").trim();
+}
 
 function renderTemplate(
   template: string,
@@ -78,6 +118,17 @@ export async function executeLlmStrategy(
 
   const baseURL = process.env[config.baseUrlEnv] ?? "https://api.deepseek.com";
   const client = new OpenAI({ apiKey, baseURL: baseURL + "/v1" });
+
+  // Filter diff to exclude noise files (lock files, node_modules, dist, etc.)
+  // so the LLM focuses on meaningful changes, not auto-generated noise.
+  if (config.excludeDiffPatterns && config.excludeDiffPatterns.length > 0) {
+    const originalLen = ctx.git.diff.length;
+    ctx.git.diff = filterDiff(ctx.git.diff, config.excludeDiffPatterns);
+    const removed = originalLen - ctx.git.diff.length;
+    if (removed > 0) {
+      console.log(`[llm] Diff filtered: ${originalLen} → ${ctx.git.diff.length} chars (removed ${removed} chars of noise)`);
+    }
+  }
 
   // Read system prompt file
   let systemPrompt: string;
@@ -502,6 +553,12 @@ export async function correctLlmOutput(
     return { action: "error", reason: `Failed to read system prompt: ${(err as Error).message}` };
   }
 
+  // Override the tool-using workflow: in correction mode the model must NOT use tools.
+  // The original system prompt instructs the model to call get_diff/read_file, but
+  // tool_choice: "none" below forbids tool use. The contradiction causes models
+  // (especially DeepSeek) to return a short error message instead of patches.
+  systemPrompt = `You are in CORRECTION mode. You ALREADY HAVE all information — the original output and validation issues are provided below. Do NOT attempt to call tools. Directly output the corrected patches.\n\n${systemPrompt}`;
+
   if (config.workspaceSkillFile) {
     const skillPath = join(workspaceDir, config.workspaceSkillFile);
     if (existsSync(skillPath)) {
@@ -564,6 +621,9 @@ MESSAGE: reason`;
 
     const corrected = response.choices[0]?.message?.content ?? "";
     console.log(`[llm] Correction response: ${corrected.length} chars`);
+    if (corrected.length < 500) {
+      console.log(`[llm] Correction response content: ${corrected}`);
+    }
 
     if (!corrected) {
       return { action: "error", reason: "LLM returned empty correction response" };

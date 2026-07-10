@@ -33,7 +33,9 @@ export interface ValidationContext {
   originalContent: string;
 }
 
-// Patterns that indicate raw LLM output leaked into the file
+// Patterns that indicate raw LLM output leaked into the file.
+// Be conservative: only match clear format leaks.
+// Code blocks (```) are NOT flagged — they're legitimate in technical docs.
 const LLM_ARTIFACT_PATTERNS: RegExp[] = [
   /^(?:Based on|根据|根据 PR|I analyzed|I've analyzed)/im,
   /^(?:Here(?:'s| is)|以下是)(?: the)? (?:updated|修改后)/im,
@@ -42,7 +44,6 @@ const LLM_ARTIFACT_PATTERNS: RegExp[] = [
   /^HEADING:/im,
   /^CONTENT:/im,
   /^MESSAGE:/im,
-  /```(?:markdown|md)?\n/im,
 ];
 
 // Files that get changelog-specific strict checks
@@ -196,8 +197,17 @@ function checkChangelogStructure(
 ): void {
   const lines = ctx.content.split("\n");
 
-  // Check page header (first 3 non-empty lines should be preserved)
-  const nonEmpty = lines.filter((l) => l.trim().length > 0);
+  // Skip YAML frontmatter (delimited by --- lines)
+  let contentStart = 0;
+  if (lines[0]?.trim() === "---") {
+    const endIdx = lines.indexOf("---", 1);
+    if (endIdx !== -1) {
+      contentStart = endIdx + 1;
+    }
+  }
+
+  // Check page header (first 3 non-empty lines after frontmatter)
+  const nonEmpty = lines.slice(contentStart).filter((l) => l.trim().length > 0);
   if (nonEmpty.length < 2) {
     issues.push({
       type: "structure_broken",
@@ -207,7 +217,7 @@ function checkChangelogStructure(
     return;
   }
 
-  // First line should be "# 更新日志" or similar changelog title
+  // First content line should be "# 更新日志" or similar changelog title
   const title = nonEmpty[0].trim();
   if (!title.startsWith("# ") || !/更新日志|changelog/i.test(title)) {
     issues.push({
